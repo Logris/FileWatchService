@@ -1,0 +1,6 @@
+**/obj/
+**/obj/
+**/bin/
+**.vs/
+**/release/
+**/debug/
