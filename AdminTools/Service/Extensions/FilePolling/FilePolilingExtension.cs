@@ -26,10 +26,6 @@ namespace FilePolling
             Trace.Listeners.Add(db_listener);
             Trace.AutoFlush = true;
 
-            poller_model = new NetworkFolderPollerViewModel(connectionString);
-
-            base_page.DataContext = poller_model;
-
             using (var connection = new SQLiteConnection(connectionString))
             {
                 connection.Open();
@@ -51,7 +47,7 @@ namespace FilePolling
                 using (var command = connection.CreateCommand())
                 {
                     command.CommandText = @"
-                    CREATE TABLE IF NOT EXISTS LAST_CHANGES (
+                    CREATE TABLE IF NOT EXISTS Snapshot (
                         Id INTEGER PRIMARY KEY AUTOINCREMENT,
                         Path TEXT NOT NULL,
                         Time TEXT NOT NULL,
@@ -70,12 +66,15 @@ namespace FilePolling
                         Status TEXT NOT NULL,
                         StatusCode INTEGER NOT NULL,
                         CreatedAt TEXT NOT NULL,
-                        CompletedAt TEXT
+                        CompletedAt TEXT,
+                        Description TEXT
                     )";
                     command.ExecuteNonQuery();
                 }
             }
 
+            poller_model = new NetworkFolderPollerViewModel(connectionString);
+            base_page.DataContext = poller_model;
             poller_model.Start();
         }
 

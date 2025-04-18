@@ -22,6 +22,7 @@ namespace FilePolling
         public TaskStatus Status { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime? CompletedAt { get; set; }
+        public string Result { get; set; }
     }
 
     public enum TaskStatus
@@ -85,7 +86,7 @@ namespace FilePolling
                 var command = connection.CreateCommand();
                 command.CommandText = @"
                 SELECT * FROM Tasks 
-                WHERE Status = @pending 
+                WHERE StatusCode = @pending 
                 ORDER BY CreatedAt ASC 
                 LIMIT 1";
 
@@ -99,9 +100,9 @@ namespace FilePolling
                         {
                             Id = reader.GetInt32(0),
                             Path = reader.GetString(1),
-                            Status = (TaskStatus)reader.GetInt32(2),
-                            CreatedAt = DateTime.Parse(reader.GetString(3), _cultureInfo),
-                            CompletedAt = await reader.IsDBNullAsync(4) ? null : DateTime.Parse(reader.GetString(4), _cultureInfo)
+                            Status = (TaskStatus)reader.GetInt32(3),
+                            CreatedAt = DateTime.Parse(reader.GetString(4), _cultureInfo),
+                            CompletedAt = await reader.IsDBNullAsync(5) ? null : DateTime.Parse(reader.GetString(5), _cultureInfo)
                         };
                     }
                     return null;
@@ -109,7 +110,7 @@ namespace FilePolling
             }
         }
 
-        public async Task UpdateTaskStatusAsync(int taskId, TaskStatus status)
+        public async Task UpdateTaskStatusAsync(int taskId, TaskStatus status, string description = null)
         {
             using (var connection = new SQLiteConnection(_connectionString))
             {
@@ -118,19 +119,22 @@ namespace FilePolling
                 command.CommandText = @"
                 UPDATE Tasks 
                 SET Status = @status,
-                    CompletedAt = @completedAt
+                StatusCode = @status_code,
+                CompletedAt = @completedAt,
+                Description = @description
                 WHERE Id = @id";
 
-                command.Parameters.AddWithValue("@status", (int)status);
+                command.Parameters.AddWithValue("@status", status.ToString());
+                command.Parameters.AddWithValue("@status_code", (int)status);
                 command.Parameters.AddWithValue("@id", taskId);
-                command.Parameters.AddWithValue("@completedAt",
-                    status == TaskStatus.Completed ? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", _cultureInfo) : null);
+                command.Parameters.AddWithValue("@completedAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", _cultureInfo));
+                command.Parameters.AddWithValue("@description", description);
 
                 await command.ExecuteNonQueryAsync();
             }
         }
 
-        public async Task UpdateTaskStatusAsync(string path, TaskStatus status)
+        public async Task UpdateTaskStatusAsync(string path, TaskStatus status, string description = null)
         {
             using (var connection = new SQLiteConnection(_connectionString))
             {
@@ -139,13 +143,17 @@ namespace FilePolling
                 command.CommandText = @"
                 UPDATE Tasks 
                 SET Status = @status,
-                    CompletedAt = @completedAt
+                    StatusCode = @status_code,
+                    CompletedAt = @completedAt,
+                    Description = @description
                 WHERE Path = @path";
 
-                command.Parameters.AddWithValue("@status", (int)status);
+                command.Parameters.AddWithValue("@status", status.ToString());
+                command.Parameters.AddWithValue("@status_code", (int)status);
                 command.Parameters.AddWithValue("@path", path);
                 command.Parameters.AddWithValue("@completedAt",
                     status == TaskStatus.Completed ? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", _cultureInfo) : null);
+                command.Parameters.AddWithValue("@description", description);
 
                 await command.ExecuteNonQueryAsync();
             }
@@ -182,18 +190,26 @@ namespace FilePolling
 
                         if (task != null)
                         {
-                            Console.WriteLine($"[{DateTime.Now}] Начало: {task.Path}");
-                            await _db.UpdateTaskStatusAsync(task.Id, TaskStatus.InProgress);
-                            var result = RunFME("sdf", task.Path, "");
-                            if (result.ExitCode == 0)
+                            try
                             {
-                                await _db.UpdateTaskStatusAsync(task.Id, TaskStatus.Completed);
+                                Console.WriteLine($"[{DateTime.Now}] Начало: {task.Path}");
+                                await _db.UpdateTaskStatusAsync(task.Id, TaskStatus.InProgress);
+                                var result = RunFME("sdf", task.Path, "");
+                                if (result.ExitCode == 0)
+                                {
+                                    await _db.UpdateTaskStatusAsync(task.Id, TaskStatus.Completed);
+                                }
+                                else
+                                {
+                                    await _db.UpdateTaskStatusAsync(task.Id, TaskStatus.Failed);
+                                }
+                                Console.WriteLine($"[{DateTime.Now}] Завершено: {task.Path}");
                             }
-                            else
+                            catch (Exception ex)
                             {
-                                await _db.UpdateTaskStatusAsync(task.Id, TaskStatus.Failed);
+                                Console.WriteLine($"Ошибка: {ex.Message}");
+                                await _db.UpdateTaskStatusAsync(task.Id, TaskStatus.Failed, ex.Message);
                             }
-                            Console.WriteLine($"[{DateTime.Now}] Завершено: {task.Path}");
                         }
                         else
                         {
@@ -335,6 +351,7 @@ namespace FilePolling
             poller.OnFileModified += OnModifyFile;
 
             LoadConfig();
+            poller.LoadSnapshotAsync().Wait();
         }
 
         #region dataBase Tasks
@@ -530,6 +547,7 @@ namespace FilePolling
         // Метод для остановки опроса
         public void Stop()
         {
+            poller.SaveSnapshotAsync().Wait();
             poller.Stop();
             processor.Stop();
         }
@@ -537,19 +555,19 @@ namespace FilePolling
         private async void OnNewFile(PollingAction action, string message)
         {
             await queue.AddTaskAsync(message);
-            await dispatcher.InvokeAsync(() => Trace.WriteLine(message, "INFO"));
+            await dispatcher.InvokeAsync(() => Trace.WriteLine(message, "NEW"));
         }
 
         private async void OnModifyFile(PollingAction action, string message)
         {
             await queue.UpdateTaskStatusAsync(message, TaskStatus.Pending);
-            await dispatcher.InvokeAsync(() => Trace.WriteLine(message, "INFO"));
+            await dispatcher.InvokeAsync(() => Trace.WriteLine(message, "MODIFY"));
         }
 
         private async void OnDeleteFile(PollingAction action, string message)
         {
             await queue.UpdateTaskStatusAsync(message, TaskStatus.Deleted);
-            await dispatcher.InvokeAsync(() => Trace.WriteLine(message, "INFO"));
+            await dispatcher.InvokeAsync(() => Trace.WriteLine(message, "DELETE"));
         }
 
         #region INotifyPropertyChanged

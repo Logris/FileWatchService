@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data.SQLite;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,6 +18,7 @@ namespace FilePolling
 
         private readonly string connection_string;
 
+        private readonly object lock_last_files = new object();
         private Dictionary<string, DateTime> last_known_files = new Dictionary<string, DateTime>();
         private CancellationTokenSource cancellation_token_source;
         private bool disposed = false;
@@ -67,44 +70,224 @@ namespace FilePolling
                 }
             }
         }
-        private void CheckForChanges()
+
+        private bool IsFileReady(string filePath)
         {
-            var current_files = new Dictionary<string, DateTime>();
-
-            foreach (var file_path in Directory.GetFiles(NetworkPath, FilterWatch, SearchOption.AllDirectories))
+            try
             {
-                var last_write_time = File.GetLastWriteTime(file_path);
-                current_files[file_path] = last_write_time;
-            }
-
-            foreach (var file in current_files)
-            {
-                if (!last_known_files.ContainsKey(file.Key))
+                // Пытаемся открыть файл с эксклюзивным доступом
+                using (var stream = File.Open(filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                 {
-                    OnNewFileDetected?.Invoke(PollingAction.NewFile, $"{file.Key}");
+                    // Дополнительная проверка что файл не пустой (опционально)
+                    return stream.Length > 0;
                 }
             }
-
-            foreach (var file in last_known_files)
+            catch (IOException)
             {
-                if (!current_files.ContainsKey(file.Key))
+                return false; // Файл заблокирован или недоступен
+            }
+            catch (Exception)
+            {
+                return false; // Другие ошибки (например, нет прав доступа)
+            }
+        }
+
+        private async Task<bool> IsFileReadyForProcessing(string filePath)
+        {
+            // 1. Быстрая проверка доступности файла
+            if (!IsFileAvailable(filePath))
+                return false;
+
+            // 2. Проверка стабильности файла (если быстро не определили)
+            return await IsFileStable(filePath, delayMs: 500, maxAttempts: 4);
+        }
+
+        private bool IsFileAvailable(string filePath)
+        {
+            try
+            {
+                using (var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.None))
                 {
-                    OnFileDeleted?.Invoke(PollingAction.DeleteFile, $"{file.Key}");
+                    return stream.Length > 0;
                 }
             }
-
-            foreach (var file in current_files)
+            catch
             {
-                if (last_known_files.TryGetValue(file.Key, out var last_write_time))
+                return false;
+            }
+        }
+
+        private async Task<bool> IsFileStable(string filePath, int delayMs, int maxAttempts)
+        {
+            var initialSize = new FileInfo(filePath).Length;
+            var initialWriteTime = File.GetLastWriteTime(filePath);
+
+            for (int i = 0; i < maxAttempts; i++)
+            {
+                await Task.Delay(delayMs);
+
+                try
                 {
-                    if (file.Value != last_write_time)
+                    var currentSize = new FileInfo(filePath).Length;
+                    var currentWriteTime = File.GetLastWriteTime(filePath);
+
+                    if (currentSize != initialSize || currentWriteTime != initialWriteTime)
+                        return false;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private async void CheckForChanges()
+        {
+            var currentFiles = new Dictionary<string, DateTime>();
+            var newFiles = new List<string>();
+            var modifiedFiles = new List<string>();
+
+            try
+            {
+                // 1. Собираем информацию о текущих файлах
+                foreach (var filePath in Directory.GetFiles(NetworkPath, FilterWatch, SearchOption.AllDirectories))
+                {
+                    try
                     {
-                        OnFileModified?.Invoke(PollingAction.ModifyFile, $"{file.Key}");
+                        var lastWriteTime = File.GetLastWriteTime(filePath);
+                        currentFiles[filePath] = lastWriteTime;
+
+                        // Определяем новые файлы
+                        if (!last_known_files.ContainsKey(filePath))
+                        {
+                            newFiles.Add(filePath);
+                        }
+                        // Определяем измененные файлы
+                        else if (last_known_files.TryGetValue(filePath, out var oldWriteTime) &&
+                                lastWriteTime != oldWriteTime)
+                        {
+                            modifiedFiles.Add(filePath);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        OnFileModified?.Invoke(PollingAction.Error, $"Error accessing {filePath}: {ex.Message}");
+                    }
+                }
+
+                // 2. Проверяем только НОВЫЕ файлы на готовность
+                var readyNewFiles = new List<string>();
+                foreach (var filePath in newFiles)
+                {
+                    if (await IsFileReadyForProcessing(filePath))
+                    {
+                        readyNewFiles.Add(filePath);
+                    }
+                }
+
+                // 3. Обрабатываем новые готовые файлы
+                foreach (var filePath in readyNewFiles)
+                {
+                    OnNewFileDetected?.Invoke(PollingAction.NewFile, filePath);
+                }
+
+                // 4. Обрабатываем измененные файлы (для них не проверяем готовность)
+                foreach (var filePath in modifiedFiles)
+                {
+                    OnFileModified?.Invoke(PollingAction.ModifyFile, filePath);
+                }
+
+                // 5. Определяем удаленные файлы
+                foreach (var file in last_known_files)
+                {
+                    if (!currentFiles.ContainsKey(file.Key))
+                    {
+                        OnFileDeleted?.Invoke(PollingAction.DeleteFile, file.Key);
+                    }
+                }
+
+                // 6. Обновляем кеш
+                last_known_files = currentFiles;
+            }
+            catch (Exception ex)
+            {
+                OnFileModified?.Invoke(PollingAction.Error, $"CheckForChanges error: {ex.Message}");
+            }
+        }
+
+        public async Task SaveSnapshotAsync()
+        {
+            try
+            {
+                using (var connection = new SQLiteConnection(connection_string))
+                {
+                    await connection.OpenAsync();
+
+                    // Очищаем предыдущий snapshot
+                    using (var clearCommand = connection.CreateCommand())
+                    {
+                        clearCommand.CommandText = "DELETE FROM Snapshot";
+                        await clearCommand.ExecuteNonQueryAsync();
+                    }
+
+                    // Сохраняем текущее состояние
+                    foreach (var file in last_known_files)
+                    {
+                        using (var insertCommand = connection.CreateCommand())
+                        {
+                            insertCommand.CommandText =
+                                @"INSERT INTO Snapshot (Path, Time, LastChange) VALUES (@path, @time, @lastChange)";
+
+                            insertCommand.Parameters.AddWithValue("@path", file.Key);
+                            insertCommand.Parameters.AddWithValue("@time", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
+                            insertCommand.Parameters.AddWithValue("@lastChange", file.Value.Ticks);
+
+                            await insertCommand.ExecuteNonQueryAsync();
+                        }
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                Trace.WriteLine($"Failed to save snapshot: {ex.Message}", "ERROR");
+            }
+        }
 
-            last_known_files = current_files;
+        public async Task LoadSnapshotAsync()
+        {
+            try
+            {
+                using (var connection = new SQLiteConnection(connection_string))
+                {
+                    await connection.OpenAsync();
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = "SELECT Path, LastChange FROM Snapshot";
+
+                        using (var reader = await command.ExecuteReaderAsync())
+                        {
+                            var snapshot = new Dictionary<string, DateTime>();
+
+                            while (await reader.ReadAsync())
+                            {
+                                string path = reader.GetString(0);
+                                long ticks = reader.GetInt64(1);
+                                snapshot[path] = new DateTime(ticks, DateTimeKind.Local);
+                            }
+
+                            lock (lock_last_files)
+                            {
+                                last_known_files = snapshot;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.WriteLine($"Failed to load snapshot: {ex.Message}", "ERROR");
+            }
         }
 
         // Реализация IDisposable
@@ -121,6 +304,8 @@ namespace FilePolling
                 if (disposing)
                 {
                     // Освобождаем управляемые ресурсы
+                    cancellation_token_source?.Cancel();
+                    SaveSnapshotAsync().Wait(); // Сохраняем snapshot при завершении
                     cancellation_token_source?.Dispose();
                 }
 
