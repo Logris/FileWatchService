@@ -6,6 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -120,13 +121,15 @@ namespace FilePolling
 
     public class TaskQueueProcessor : IDisposable // Добавлен интерфейс IDisposable
     {
+        private readonly NetworkFolderPollerViewModel _owner;
         private readonly TaskQueueDatabase _db;
         private readonly CancellationTokenSource _cts;
         private bool _isRunning;
         private bool _disposed;
 
-        public TaskQueueProcessor(TaskQueueDatabase db)
+        public TaskQueueProcessor(NetworkFolderPollerViewModel owner, TaskQueueDatabase db)
         {
+            _owner = owner;
             _db = db;
             _cts = new CancellationTokenSource();
             _isRunning = false;
@@ -152,7 +155,7 @@ namespace FilePolling
                             {
                                 Console.WriteLine($"[{DateTime.Now}] Начало: {task.Path}");
                                 await _db.UpdateTaskStatusAsync(task.Id, TaskStatus.InProgress);
-                                var result = RunFME("sdf", task.Path, "");
+                                var result = RunFME(_owner.AppPath, _owner.ReplacedCommandArgs, task.Path);
                                 if (result.ExitCode == 0)
                                 {
                                     await _db.UpdateTaskStatusAsync(task.Id, TaskStatus.Completed);
@@ -197,13 +200,14 @@ namespace FilePolling
             _cts.Cancel();
         }
 
-        static (string Output, string Error, int ExitCode) RunFME(string workspacePath, string sourceDataset, string destDataset)
+        static (string Output, string Error, int ExitCode) RunFME(string appPath, string args, string pathToZip)
         {
             // Путь к исполняемому файлу FME
-            string fmePath = @"C:\Program Files\FME\fme.exe";
+            string fmePath = appPath;
 
             // Аргументы командной строки
-            string arguments = $"--quiet --NoUI \"{workspacePath}\" --SourceDataset \"{sourceDataset}\" --DestDataset \"{destDataset}\"";
+            string arguments = args;
+            arguments += $" --PathToZip {pathToZip}";
 
             // Настройка процесса
             ProcessStartInfo startInfo = new ProcessStartInfo
@@ -294,13 +298,14 @@ namespace FilePolling
         private readonly NetworkFolderPoller poller;
         private readonly Dispatcher dispatcher;
         private ICommand pick_folder_command;
+        private ICommand pick_app_command;
         private readonly SqliteCommandManager _dbManager;
 
         public NetworkFolderPollerViewModel(SqliteCommandManager manager)
         {
             _dbManager = manager;
             queue = new TaskQueueDatabase(_dbManager);
-            processor = new TaskQueueProcessor(queue);
+            processor = new TaskQueueProcessor(this, queue);
             poller = new NetworkFolderPoller(_dbManager);
             dispatcher = Dispatcher.CurrentDispatcher;
 
@@ -339,23 +344,46 @@ namespace FilePolling
         }
         public void PickFolderCommandExecute()
         {
-            var dlg = new FolderPicker();
-            dlg.InputPath = Directory.Exists(NetworkPath) ? NetworkPath :
+            var picker = new FilePicker();
+
+            picker.PickFolders = true;
+            picker.MustExist = true;
+            picker.InputPath =
+                Directory.Exists(NetworkPath) ? NetworkPath :
                 Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
 
-            if (dlg.ShowDialog() == true)
+            if (picker.ShowDialog() == true)
             {
                 if (NetworkPath.Length > 0)
                 {
                     Trace.WriteLine($"STOP Watch directory: ===================== \"{NetworkPath}\" =========================", "INFO");
                 }
 
-                NetworkPath = dlg.ResultPath;
+                NetworkPath = picker.ResultPath;
                 Trace.WriteLine($"START Watch directory: ===================== \"{NetworkPath}\" =========================", "INFO");
-
-                //SaveConfig();
-                //StartWatching();
             }
+        }
+
+        public ICommand PickAppCommand
+        {
+            get
+            {
+                return pick_app_command ?? (pick_app_command = new RelayCommand(
+                   x =>
+                   {
+                       var picker = new FilePicker();
+
+                       picker.MustExist = true;
+                       picker.InputPath =
+                           Directory.Exists(AppPath) ? AppPath : Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+
+                       if (picker.ShowDialog() == true)
+                       {
+                           AppPath = picker.ResultPath;
+                       }
+                   }));
+            }
+
         }
 
         // Свойство для привязки NetworkPath
@@ -406,7 +434,21 @@ namespace FilePolling
             }
         }
 
-        private string command_args = "/t fme.exe /e";
+        private string app_path = "\"c:\\ProgramFiles\\FME\\FME.exe\"";
+        public string AppPath
+        {
+            get => app_path;
+            set
+            {
+                if (app_path != value)
+                {
+                    app_path = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        private string command_args = "\"workspace.fmw\"";
         public string CommandArgs
         {
             get => command_args;
@@ -415,6 +457,21 @@ namespace FilePolling
                 if (command_args != value)
                 {
                     command_args = value;
+                    OnPropertyChanged();
+                    ReplacedCommandArgs = Regex.Replace(command_args, @"\r\n?|\n", " ");
+                }
+            }
+        }
+
+        private string replaced_command_args;
+        public string ReplacedCommandArgs
+        {
+            get => replaced_command_args;
+            set
+            {
+                if (replaced_command_args != value)
+                {
+                    replaced_command_args = value;
                     OnPropertyChanged();
                 }
             }
@@ -447,10 +504,23 @@ namespace FilePolling
                     FilterWatch = filter[0].InnerText;
                 }
 
+                XmlNodeList app = doc.GetElementsByTagName("AppPath");
+                if (app.Count > 0)
+                {
+                    AppPath = app[0].InnerText;
+                }
+
                 XmlNodeList command = doc.GetElementsByTagName("CommandArgs");
                 if (command.Count > 0)
                 {
-                    CommandArgs = command[0].InnerText;
+                    if (command[0] is XmlCDataSection cdata)
+                    {
+                        CommandArgs = cdata.Data;
+                    }
+                    else
+                    {
+                        CommandArgs = command[0].InnerText;
+                    }
                 }
             }
             catch (Exception ex)
@@ -467,12 +537,13 @@ namespace FilePolling
                 StreamWriter file = new StreamWriter(new FileStream(name, FileMode.Create), Encoding.UTF8);
 
                 string xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-                xml += "<Configuration>\n";
-                xml += "\t<WatchFolder>" + NetworkPath + "</WatchFolder>\n";
-                xml += "\t<Interval>" + PollingInterval + "</Interval>\n";
-                xml += "\t<Filter>" + FilterWatch + "</Filter>\n";
-                xml += "\t<CommandArgs>" + CommandArgs + "</CommandArgs>\n";
-                xml += "</Configuration>\n";
+                xml += $"<Configuration>\n";
+                xml += $"\t<WatchFolder>{NetworkPath}</WatchFolder>\n";
+                xml += $"\t<Interval>{PollingInterval}</Interval>\n";
+                xml += $"\t<Filter>{FilterWatch}</Filter>\n";
+                xml += $"\t<AppPath>{AppPath}</AppPath>\n";
+                xml += $"\t<CommandArgs><![CDATA[{CommandArgs}]]></CommandArgs>\n";
+                xml += $"</Configuration>\n";
 
                 file.Write(xml);
                 file.Flush();

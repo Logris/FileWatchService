@@ -9,7 +9,7 @@ using System.Windows.Interop;
 
 namespace FilePolling
 {
-    public class FolderPicker
+    public class FilePicker
     {
         private readonly List<string> _resultPaths = new List<string>();
         private readonly List<string> _resultNames = new List<string>();
@@ -19,14 +19,21 @@ namespace FilePolling
         public string ResultPath => ResultPaths.FirstOrDefault();
         public string ResultName => ResultNames.FirstOrDefault();
         public virtual string InputPath { get; set; }
+        public virtual bool PickFolders { get; set; } = false;
+        public virtual bool MustExist { get; set; } = true;
         public virtual bool ForceFileSystem { get; set; }
-        public virtual bool Multiselect { get; set; }
+        public virtual bool Multiselect { get; set; } = false;
         public virtual string Title { get; set; }
         public virtual string OkButtonLabel { get; set; }
         public virtual string FileNameLabel { get; set; }
 
         protected virtual int SetOptions(int options)
         {
+            if (PickFolders)
+            {
+                options |= (int)FOS.FOS_PICKFOLDERS;
+            }
+
             if (ForceFileSystem)
             {
                 options |= (int)FOS.FOS_FORCEFILESYSTEM;
@@ -36,6 +43,13 @@ namespace FilePolling
             {
                 options |= (int)FOS.FOS_ALLOWMULTISELECT;
             }
+
+            if (MustExist)
+            {
+                options |= (int)FOS.FOS_PATHMUSTEXIST;
+                options |= (int)FOS.FOS_FILEMUSTEXIST;
+            }
+
             return options;
         }
 
@@ -58,7 +72,8 @@ namespace FilePolling
                 dialog.SetFolder(item);
             }
 
-            var options = FOS.FOS_PICKFOLDERS;
+            //var options = FOS.FOS_PICKFOLDERS;
+            var options = FOS.FOS_PATHMUSTEXIST;
             options = (FOS)SetOptions((int)options);
             dialog.SetOptions(options);
 

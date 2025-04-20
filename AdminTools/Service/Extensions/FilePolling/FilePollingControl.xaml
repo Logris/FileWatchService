@@ -181,7 +181,7 @@
             <RowDefinition Height="30" />
             <RowDefinition Height="30" />
             <RowDefinition Height="30" />
-            <RowDefinition />
+            <RowDefinition Height="30*" />
         </Grid.RowDefinitions>
 
         <TextBlock
@@ -235,8 +235,21 @@
             Grid.Row="4"
             Grid.Column="1"
             Margin="0,0,0,1"
-            Tag="/c $file_path"
-            Text="{Binding CreateCommand, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+            IsReadOnly="True"
+            Tag="Path to FME.exe"
+            Text="{Binding AppPath, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+        <Button
+            Grid.Row="4"
+            Grid.Column="2"
+            Margin="2,1,10,1"
+            Background="Transparent"
+            BorderBrush="Transparent"
+            BorderThickness="0"
+            Command="{Binding PickAppCommand}"
+            Content="&#xA001;"
+            FontFamily="{StaticResource Font.Icons}"
+            FontSize="23px" />
+
         <TextBox
             x:Name="DelayBox"
             Grid.Row="3"
@@ -251,5 +264,24 @@
             HorizontalAlignment="Right"
             Text="Polling Interval"
             ToolTip="Период опроса директории в секундах." />
+        <TextBlock
+            x:Name="CmdArgs"
+            Grid.Row="5"
+            Margin="0,5,5,0"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            Text="Command Args" />
+        <StackPanel Grid.Row="5" Grid.Column="1">
+            <TextBox
+                MinHeight="30"
+                MaxHeight="110"
+                VerticalContentAlignment="Top"
+                AcceptsReturn="True"
+                Tag="Arguments for FME.exe"
+                Text="{Binding CommandArgs, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                TextAlignment="Left"
+                TextWrapping="Wrap"
+                VerticalScrollBarVisibility="Auto" />
+        </StackPanel>
     </Grid>
 </UserControl>
