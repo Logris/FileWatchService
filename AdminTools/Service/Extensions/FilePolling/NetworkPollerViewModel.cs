@@ -1,7 +1,6 @@
 ﻿using Command;
 using System;
 using System.ComponentModel;
-using System.Data.SQLite;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -36,127 +35,86 @@ namespace FilePolling
 
     public class TaskQueueDatabase
     {
-        private readonly string _connectionString;
+        private readonly SqliteCommandManager _dbManager;
         private readonly CultureInfo _cultureInfo = CultureInfo.InvariantCulture;
 
-        public TaskQueueDatabase(string connectionString)
+        public TaskQueueDatabase(SqliteCommandManager manager)
         {
-            _connectionString = connectionString;
+            _dbManager = manager;
         }
 
         public async Task AddTaskAsync(string path)
         {
-            using (var connection = new SQLiteConnection(_connectionString))
-            {
-                await connection.OpenAsync();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
+            await _dbManager.ExecuteNonQueryAsync(@"
                 INSERT INTO Tasks (Path, Status, StatusCode, CreatedAt)
-                VALUES (@path, @status, @status_code, @createdAt)";
-
-                command.Parameters.AddWithValue("@path", path);
-                command.Parameters.AddWithValue("@status", TaskStatus.Pending.ToString());
-                command.Parameters.AddWithValue("@status_code", (int)TaskStatus.Pending);
-                command.Parameters.AddWithValue("@createdAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", _cultureInfo));
-
-                await command.ExecuteNonQueryAsync();
-            }
+                VALUES (@path, @status, @status_code, @createdAt)",
+                ("@path", path),
+                ("@status", TaskStatus.Pending.ToString()),
+                ("@status_code", (int)TaskStatus.Pending),
+                ("@createdAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", _cultureInfo)));
         }
 
         public async Task RemoveTaskAsync(int taskId)
         {
-            using (var connection = new SQLiteConnection(_connectionString))
-            {
-                await connection.OpenAsync();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
-                DELETE FROM Tasks 
-                WHERE Id = @id";
-
-                command.Parameters.AddWithValue("@id", taskId);
-                await command.ExecuteNonQueryAsync();
-            }
+            await _dbManager.ExecuteNonQueryAsync(@"DELETE FROM Tasks WHERE Id = @id", ("id", taskId));
         }
 
         public async Task<TaskItem> GetNextTaskAsync()
         {
-            using (var connection = new SQLiteConnection(_connectionString))
+            using (var reader = await _dbManager.ExecuteReaderAsync(@"
+                        SELECT * FROM Tasks  
+                        WHERE StatusCode = @pending 
+                        ORDER BY CreatedAt ASC LIMIT 1",
+                        ("@pending", (int)TaskStatus.Pending)))
             {
-                await connection.OpenAsync();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
-                SELECT * FROM Tasks 
-                WHERE StatusCode = @pending 
-                ORDER BY CreatedAt ASC 
-                LIMIT 1";
-
-                command.Parameters.AddWithValue("@pending", (int)TaskStatus.Pending);
-
-                using (var reader = await command.ExecuteReaderAsync())
+                if (await reader.ReadAsync())
                 {
-                    if (await reader.ReadAsync())
+                    return new TaskItem
                     {
-                        return new TaskItem
-                        {
-                            Id = reader.GetInt32(0),
-                            Path = reader.GetString(1),
-                            Status = (TaskStatus)reader.GetInt32(3),
-                            CreatedAt = DateTime.Parse(reader.GetString(4), _cultureInfo),
-                            CompletedAt = await reader.IsDBNullAsync(5) ? null : DateTime.Parse(reader.GetString(5), _cultureInfo)
-                        };
-                    }
-                    return null;
+                        Id = reader.GetInt32(0),
+                        Path = reader.GetString(1),
+                        Status = (TaskStatus)reader.GetInt32(3),
+                        CreatedAt = DateTime.Parse(reader.GetString(4), _cultureInfo),
+                        CompletedAt = await reader.IsDBNullAsync(5) ? null : DateTime.Parse(reader.GetString(5), _cultureInfo)
+                    };
                 }
+                return null;
             }
         }
 
         public async Task UpdateTaskStatusAsync(int taskId, TaskStatus status, string description = null)
         {
-            using (var connection = new SQLiteConnection(_connectionString))
-            {
-                await connection.OpenAsync();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
-                UPDATE Tasks 
-                SET Status = @status,
-                StatusCode = @status_code,
-                CompletedAt = @completedAt,
-                Description = @description
-                WHERE Id = @id";
+            await _dbManager.ExecuteNonQueryAsync(@"
+                    UPDATE Tasks 
+                    SET 
+                        Status = @status,
+                        StatusCode = @status_code,
+                        CompletedAt = @completedAt,
+                        Description = @description
+                    WHERE Id = @id",
 
-                command.Parameters.AddWithValue("@status", status.ToString());
-                command.Parameters.AddWithValue("@status_code", (int)status);
-                command.Parameters.AddWithValue("@id", taskId);
-                command.Parameters.AddWithValue("@completedAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", _cultureInfo));
-                command.Parameters.AddWithValue("@description", description);
-
-                await command.ExecuteNonQueryAsync();
-            }
+                    ("@status", status.ToString()),
+                    ("@status_code", (int)status),
+                    ("@id", taskId),
+                    ("@completedAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", _cultureInfo)),
+                    ("@description", description));
         }
 
         public async Task UpdateTaskStatusAsync(string path, TaskStatus status, string description = null)
         {
-            using (var connection = new SQLiteConnection(_connectionString))
-            {
-                await connection.OpenAsync();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
+            await _dbManager.ExecuteNonQueryAsync(@"
                 UPDATE Tasks 
                 SET Status = @status,
                     StatusCode = @status_code,
                     CompletedAt = @completedAt,
                     Description = @description
-                WHERE Path = @path";
+                WHERE Path = @path",
 
-                command.Parameters.AddWithValue("@status", status.ToString());
-                command.Parameters.AddWithValue("@status_code", (int)status);
-                command.Parameters.AddWithValue("@path", path);
-                command.Parameters.AddWithValue("@completedAt",
-                    status == TaskStatus.Completed ? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", _cultureInfo) : null);
-                command.Parameters.AddWithValue("@description", description);
-
-                await command.ExecuteNonQueryAsync();
-            }
+                ("@status", status.ToString()),
+                ("@status_code", (int)status),
+                ("@path", path),
+                ("@completedAt", status == TaskStatus.Completed ? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", _cultureInfo) : null),
+                ("@description", description));
         }
     }
 
@@ -336,14 +294,14 @@ namespace FilePolling
         private readonly NetworkFolderPoller poller;
         private readonly Dispatcher dispatcher;
         private ICommand pick_folder_command;
-        private readonly string connection_string;
+        private readonly SqliteCommandManager _dbManager;
 
-        public NetworkFolderPollerViewModel(string connectionString)
+        public NetworkFolderPollerViewModel(SqliteCommandManager manager)
         {
-            connection_string = connectionString;
-            queue = new TaskQueueDatabase(connectionString);
+            _dbManager = manager;
+            queue = new TaskQueueDatabase(_dbManager);
             processor = new TaskQueueProcessor(queue);
-            poller = new NetworkFolderPoller(connectionString);
+            poller = new NetworkFolderPoller(_dbManager);
             dispatcher = Dispatcher.CurrentDispatcher;
 
             poller.OnNewFileDetected += OnNewFile;
@@ -351,25 +309,18 @@ namespace FilePolling
             poller.OnFileModified += OnModifyFile;
 
             LoadConfig();
-            poller.LoadSnapshotAsync().Wait();
+            poller.LoadSnapshotAsync().GetAwaiter().GetResult();
         }
 
         #region dataBase Tasks
         public async Task AddTaskAsync(string path)
         {
-            using (var connection = new SQLiteConnection(connection_string))
-            {
-                await connection.OpenAsync();
-                var command = connection.CreateCommand();
-                command.CommandText = @"
+            await _dbManager.ExecuteNonQueryAsync(@"
                 INSERT INTO Tasks (Path, Status, CreatedAt)
-                VALUES (@path, @status, @createdAt)";
-
-                command.Parameters.AddWithValue("@path", path);
-                command.Parameters.AddWithValue("@status", (int)TaskStatus.Pending);
-                command.Parameters.AddWithValue("@createdAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-                await command.ExecuteNonQueryAsync();
-            }
+                VALUES (@path, @status, @createdAt)",
+                ("@path", path),
+                ("@status", (int)TaskStatus.Pending),
+                ("@createdAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")));
         }
         #endregion
 
@@ -547,7 +498,7 @@ namespace FilePolling
         // Метод для остановки опроса
         public void Stop()
         {
-            poller.SaveSnapshotAsync().Wait();
+            poller.SaveSnapshot();
             poller.Stop();
             processor.Stop();
         }

@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Data.SQLite;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -16,7 +15,7 @@ namespace FilePolling
         public int PollingInterval { get; set; } = 5;
         public string FilterWatch { get; set; } = "*.*";
 
-        private readonly string connection_string;
+        private readonly SqliteCommandManager _dbManager;
 
         private readonly object lock_last_files = new object();
         private Dictionary<string, DateTime> last_known_files = new Dictionary<string, DateTime>();
@@ -27,9 +26,9 @@ namespace FilePolling
         public event Action<PollingAction, string> OnFileDeleted;
         public event Action<PollingAction, string> OnFileModified;
 
-        public NetworkFolderPoller(string connectionString)
+        public NetworkFolderPoller(SqliteCommandManager manager)
         {
-            connection_string = connectionString;
+            _dbManager = manager;
             cancellation_token_source = new CancellationTokenSource();
         }
 
@@ -183,14 +182,20 @@ namespace FilePolling
                     if (await IsFileReadyForProcessing(filePath))
                     {
                         readyNewFiles.Add(filePath);
+
+                        if (!last_known_files.ContainsKey(filePath))
+                        {
+                            OnNewFileDetected?.Invoke(PollingAction.NewFile, filePath);
+                        }
                     }
                 }
 
                 // 3. Обрабатываем новые готовые файлы
-                foreach (var filePath in readyNewFiles)
-                {
-                    OnNewFileDetected?.Invoke(PollingAction.NewFile, filePath);
-                }
+                //                 foreach (var filePath in readyNewFiles)
+                //                 {
+                //                     if (last_known_files.ContainsKey(filePath)) continue;
+                //                     OnNewFileDetected?.Invoke(PollingAction.NewFile, filePath);
+                //                 }
 
                 // 4. Обрабатываем измененные файлы (для них не проверяем готовность)
                 foreach (var filePath in modifiedFiles)
@@ -220,33 +225,26 @@ namespace FilePolling
         {
             try
             {
-                using (var connection = new SQLiteConnection(connection_string))
+                // Создаем параметры динамически
+                var parameters = new List<(string, object)>();
+                var values = new List<string>();
+
+                int i = 0;
+                foreach (var file in last_known_files)
                 {
-                    await connection.OpenAsync();
+                    values.Add($"(@path{i}, @time{i}, @lastChange{i})");
 
-                    // Очищаем предыдущий snapshot
-                    using (var clearCommand = connection.CreateCommand())
-                    {
-                        clearCommand.CommandText = "DELETE FROM Snapshot";
-                        await clearCommand.ExecuteNonQueryAsync();
-                    }
+                    parameters.Add(($"@path{i}", file.Key));
+                    parameters.Add(($"@time{i}", file.Value.ToString("yyyy-MM-dd HH:mm:ss")));
+                    parameters.Add(($"@lastChange{i}", file.Value.Ticks));
 
-                    // Сохраняем текущее состояние
-                    foreach (var file in last_known_files)
-                    {
-                        using (var insertCommand = connection.CreateCommand())
-                        {
-                            insertCommand.CommandText =
-                                @"INSERT INTO Snapshot (Path, Time, LastChange) VALUES (@path, @time, @lastChange)";
-
-                            insertCommand.Parameters.AddWithValue("@path", file.Key);
-                            insertCommand.Parameters.AddWithValue("@time", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
-                            insertCommand.Parameters.AddWithValue("@lastChange", file.Value.Ticks);
-
-                            await insertCommand.ExecuteNonQueryAsync();
-                        }
-                    }
+                    i++;
                 }
+
+                await _dbManager.ExecuteNonQueryAsync(
+                    @"DELETE FROM Snapshot;
+                      INSERT INTO Snapshot (Path, Time, LastChange)
+                      VALUES " + string.Join(",", values) + "; COMMIT; ", parameters.ToArray());
             }
             catch (Exception ex)
             {
@@ -254,34 +252,57 @@ namespace FilePolling
             }
         }
 
+        public void SaveSnapshot()
+        {
+            try
+            {
+                // Создаем параметры динамически
+                var parameters = new List<(string, object)>();
+                var values = new List<string>();
+
+                int i = 0;
+                foreach (var file in last_known_files)
+                {
+                    values.Add($"(@path{i}, @time{i}, @lastChange{i})");
+
+                    parameters.Add(($"@path{i}", file.Key));
+                    parameters.Add(($"@time{i}", file.Value.ToString("yyyy-MM-dd HH:mm:ss")));
+                    parameters.Add(($"@lastChange{i}", file.Value.Ticks));
+
+                    i++;
+                }
+
+                _dbManager.ExecuteNonQuery(
+                    @"DELETE FROM Snapshot;
+                      INSERT INTO Snapshot (Path, Time, LastChange)
+                      VALUES " + string.Join(",", values) + ";", parameters.ToArray());
+            }
+            catch (Exception ex)
+            {
+                Trace.WriteLine($"Failed to save snapshot: {ex.Message}", "ERROR");
+            }
+        }
+
+
         public async Task LoadSnapshotAsync()
         {
             try
             {
-                using (var connection = new SQLiteConnection(connection_string))
+                var snapshot = new Dictionary<string, DateTime>();
+
+                using (var reader = await _dbManager.ExecuteReaderAsync("SELECT Path, LastChange FROM Snapshot"))
                 {
-                    await connection.OpenAsync();
-                    using (var command = connection.CreateCommand())
+                    while (reader.Read())
                     {
-                        command.CommandText = "SELECT Path, LastChange FROM Snapshot";
-
-                        using (var reader = await command.ExecuteReaderAsync())
-                        {
-                            var snapshot = new Dictionary<string, DateTime>();
-
-                            while (await reader.ReadAsync())
-                            {
-                                string path = reader.GetString(0);
-                                long ticks = reader.GetInt64(1);
-                                snapshot[path] = new DateTime(ticks, DateTimeKind.Local);
-                            }
-
-                            lock (lock_last_files)
-                            {
-                                last_known_files = snapshot;
-                            }
-                        }
+                        string path = reader.GetString(0);
+                        long ticks = reader.GetInt64(1);
+                        snapshot[path] = new DateTime(ticks, DateTimeKind.Local);
                     }
+                }
+
+                lock (lock_last_files)
+                {
+                    last_known_files = snapshot;
                 }
             }
             catch (Exception ex)
@@ -305,7 +326,7 @@ namespace FilePolling
                 {
                     // Освобождаем управляемые ресурсы
                     cancellation_token_source?.Cancel();
-                    SaveSnapshotAsync().Wait(); // Сохраняем snapshot при завершении
+                    //SaveSnapshotAsync().Wait(); // Сохраняем snapshot при завершении
                     cancellation_token_source?.Dispose();
                 }
 

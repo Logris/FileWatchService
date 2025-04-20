@@ -1,6 +1,5 @@
 ﻿
 using System;
-using System.Data.SQLite;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -18,62 +17,15 @@ namespace FilePolling
         {
             string dll_dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             string databasePath = dll_dir + "\\database.db";
-            string connectionString = $"Data Source={databasePath}";
 
-            db_listener = new DatabaseTraceListener(connectionString, "LOG");
+            var db_manager = new SqliteCommandManager(databasePath);
+            db_listener = new DatabaseTraceListener(db_manager, "LOG");
 
             Trace.Listeners.Add(new TextWriterTraceListener(dll_dir + "\\Polling.log"));
             Trace.Listeners.Add(db_listener);
             Trace.AutoFlush = true;
 
-            using (var connection = new SQLiteConnection(connectionString))
-            {
-                connection.Open();
-
-                // Создание таблицы LOG
-                using (var command = connection.CreateCommand())
-                {
-                    command.CommandText = @"
-                    CREATE TABLE IF NOT EXISTS LOG (
-                        Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        Time TEXT NOT NULL,
-                        Category TEXT NOT NULL,
-                        Message TEXT NOT NULL
-                    );";
-                    command.ExecuteNonQuery();
-                }
-
-                // Создание таблицы LAST_FILE_LIST
-                using (var command = connection.CreateCommand())
-                {
-                    command.CommandText = @"
-                    CREATE TABLE IF NOT EXISTS Snapshot (
-                        Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        Path TEXT NOT NULL,
-                        Time TEXT NOT NULL,
-                        LastChange INTEGER NOT NULL
-                    );";
-                    command.ExecuteNonQuery();
-                }
-
-                // Создание таблицы EXECUTE_RESULT
-                using (var command = connection.CreateCommand())
-                {
-                    command.CommandText = @"
-                        CREATE TABLE IF NOT EXISTS Tasks (
-                        Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        Path TEXT NOT NULL,
-                        Status TEXT NOT NULL,
-                        StatusCode INTEGER NOT NULL,
-                        CreatedAt TEXT NOT NULL,
-                        CompletedAt TEXT,
-                        Description TEXT
-                    )";
-                    command.ExecuteNonQuery();
-                }
-            }
-
-            poller_model = new NetworkFolderPollerViewModel(connectionString);
+            poller_model = new NetworkFolderPollerViewModel(db_manager);
             base_page.DataContext = poller_model;
             poller_model.Start();
         }

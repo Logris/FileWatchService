@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Data.SQLite;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,17 +8,17 @@ namespace FilePolling
 {
     public class DatabaseTraceListener : TraceListener
     {
-        private readonly string connection_string;
         private readonly string table_name;
         private readonly List<LogEntry> log_buffer = new List<LogEntry>();
         private readonly int buffer_size = 10; // Размер буфера
         private readonly TimeSpan flush_interval = TimeSpan.FromSeconds(10); // Интервал сброса буфера
         private readonly object buffer_lock = new object();
         private readonly CancellationTokenSource cancellation_source;
+        private readonly SqliteCommandManager _db_manager;
 
-        public DatabaseTraceListener(string connection_string, string table_name)
+        public DatabaseTraceListener(SqliteCommandManager manager, string table_name)
         {
-            this.connection_string = connection_string ?? throw new ArgumentNullException(nameof(connection_string));
+            this._db_manager = manager;
             this.table_name = table_name ?? throw new ArgumentNullException(nameof(table_name));
 
             this.cancellation_source = new CancellationTokenSource();
@@ -73,21 +72,14 @@ namespace FilePolling
 
             try
             {
-                using (var connection = new SQLiteConnection(connection_string))
+                var query = $"INSERT INTO {table_name} (Time, Category, Message) VALUES (@Time, @Category, @Message)";
+                foreach (var log in buffer_copy)
                 {
-                    await connection.OpenAsync();
-                    var query = $"INSERT INTO {table_name} (Time, Category, Message) VALUES (@Time, @Category, @Message)";
-                    foreach (var log in buffer_copy)
-                    {
-                        using (var command = new SQLiteCommand(query, connection))
-                        {
-                            command.Parameters.AddWithValue("@Message", log.Message);
-                            command.Parameters.AddWithValue("@Category", log.Category);
-                            command.Parameters.AddWithValue("@Time", log.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"));
-
-                            await command.ExecuteNonQueryAsync();
-                        }
-                    }
+                    await _db_manager.ExecuteNonQueryAsync(query,
+                        ("@Message", log.Message),
+                        ("@Category", log.Category),
+                        ("@Time", log.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"))
+                    );
                 }
             }
             catch (Exception ex)
