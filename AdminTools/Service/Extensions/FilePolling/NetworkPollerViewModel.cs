@@ -123,7 +123,7 @@ namespace FilePolling
     {
         private readonly NetworkFolderPollerViewModel _owner;
         private readonly TaskQueueDatabase _db;
-        private readonly CancellationTokenSource _cts;
+        private CancellationTokenSource _cts;
         private bool _isRunning;
         private bool _disposed;
 
@@ -140,6 +140,8 @@ namespace FilePolling
         {
             if (_isRunning || _disposed) return;
             _isRunning = true;
+            _cts.Cancel();
+            _cts = new CancellationTokenSource();
 
             Task.Run(async () =>
             {
@@ -198,6 +200,8 @@ namespace FilePolling
         {
             if (!_isRunning || _disposed) return;
             _cts.Cancel();
+
+            _isRunning = false;
         }
 
         static (string Output, string Error, int ExitCode) RunFME(string appPath, string args, string pathToZip)
@@ -207,7 +211,7 @@ namespace FilePolling
 
             // Аргументы командной строки
             string arguments = args;
-            arguments += $" --PathToZip {pathToZip}";
+            arguments += $" --PathToZip \"{pathToZip}\"";
 
             // Настройка процесса
             ProcessStartInfo startInfo = new ProcessStartInfo
